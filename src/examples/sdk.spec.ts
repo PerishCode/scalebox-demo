@@ -9,8 +9,9 @@
  * - Multi-lifecycle: serial execution, fail fast on any error
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, afterAll, expect } from 'vitest';
 import { Sandbox } from '@scalebox/sdk';
+import { formatStatsTable, calculateStats } from '@/lib';
 import {
   createSandbox,
   connectSandbox,
@@ -20,6 +21,8 @@ import {
   runLifecycle,
   sleep,
   config,
+  aggregateTimings,
+  type LifecycleTimings,
   type LifecycleResult,
 } from './sdk/core';
 
@@ -39,6 +42,7 @@ const TEST_CONFIG = {
 // ============== Test Results Storage ==============
 
 interface TestResult {
+  testName: string;
   sandboxId?: string;
   success: boolean;
   error?: string;
@@ -52,12 +56,84 @@ interface TestResult {
   lifecycleResults: LifecycleResult[];
 }
 
+// ============== Summary Helper ==============
+
+function printSummary(suiteName: string, results: TestResult[]) {
+  const successful = results.filter((r) => r.success);
+  const failed = results.filter((r) => !r.success);
+
+  console.log('\n' + '='.repeat(60));
+  console.log(`${suiteName} SUMMARY`);
+  console.log('='.repeat(60));
+  console.log(`Total: ${results.length}, Success: ${successful.length}, Failed: ${failed.length}`);
+  console.log(`Success Rate: ${results.length > 0 ? ((successful.length / results.length) * 100).toFixed(1) : 0}%`);
+
+  // Lifecycle operation statistics (from successful tests)
+  if (successful.length > 0) {
+    const allLifecycleTimings: LifecycleTimings[] = [];
+    for (const r of successful) {
+      for (const lr of r.lifecycleResults) {
+        allLifecycleTimings.push(lr.timings);
+      }
+    }
+
+    if (allLifecycleTimings.length > 0) {
+      console.log('\nLifecycle Operation Statistics:');
+      console.log(formatStatsTable(aggregateTimings(allLifecycleTimings)));
+    }
+
+    // Sandbox operation statistics
+    const createTimes = successful.map((r) => r.timings.create).filter((t): t is number => t !== undefined);
+    const connectTimes = successful.flatMap((r) => r.timings.connect || []);
+    const pauseTimes = successful.flatMap((r) => r.timings.pause || []);
+    const killTimes = successful.map((r) => r.timings.kill).filter((t): t is number => t !== undefined);
+
+    console.log('\nSandbox Operation Statistics:');
+    if (createTimes.length > 0) {
+      const s = calculateStats(createTimes);
+      console.log(`  create:  min=${s.min}ms, max=${s.max}ms, avg=${s.avg}ms (n=${createTimes.length})`);
+    }
+    if (connectTimes.length > 0) {
+      const s = calculateStats(connectTimes);
+      console.log(`  connect: min=${s.min}ms, max=${s.max}ms, avg=${s.avg}ms (n=${connectTimes.length})`);
+    }
+    if (pauseTimes.length > 0) {
+      const s = calculateStats(pauseTimes);
+      console.log(`  pause:   min=${s.min}ms, max=${s.max}ms, avg=${s.avg}ms (n=${pauseTimes.length})`);
+    }
+    if (killTimes.length > 0) {
+      const s = calculateStats(killTimes);
+      console.log(`  kill:    min=${s.min}ms, max=${s.max}ms, avg=${s.avg}ms (n=${killTimes.length})`);
+    }
+  }
+
+  // Failed tests details
+  if (failed.length > 0) {
+    console.log('\nFailed Tests:');
+    for (const r of failed) {
+      console.log(`  [${r.testName}] ${r.sandboxId || 'no-sandbox'}`);
+      console.log(`    Failed at: ${r.failedAt}`);
+      console.log(`    Error: ${r.error}`);
+    }
+  }
+
+  console.log('');
+}
+
 // ============== sdk - (5 × 2) ==============
 
 describe('sdk - (5 × 2)', () => {
+  const results: TestResult[] = [];
+
+  afterAll(() => {
+    printSummary('sdk - (5 × 2)', results);
+  });
+
   for (let i = 1; i <= TEST_CONFIG.multiSandbox.M; i++) {
     it.concurrent(`Sandbox ${i}/${TEST_CONFIG.multiSandbox.M}`, async () => {
+      const testName = `Sandbox ${i}/${TEST_CONFIG.multiSandbox.M}`;
       const result: TestResult = {
+        testName,
         success: false,
         timings: { connect: [], pause: [] },
         lifecycleResults: [],
@@ -129,7 +205,7 @@ describe('sdk - (5 × 2)', () => {
 
         throw error;
       } finally {
-        // noop
+        results.push(result);
       }
     }, 5 * 60 * 1000);
   }
@@ -138,8 +214,16 @@ describe('sdk - (5 × 2)', () => {
 // ============== sdk - (1 × 5) ==============
 
 describe('sdk - (1 × 5)', () => {
+  const results: TestResult[] = [];
+
+  afterAll(() => {
+    printSummary('sdk - (1 × 5)', results);
+  });
+
   it('Full lifecycle', async () => {
+    const testName = 'Full lifecycle';
     const result: TestResult = {
+      testName,
       success: false,
       timings: { connect: [], pause: [] },
       lifecycleResults: [],
@@ -209,7 +293,7 @@ describe('sdk - (1 × 5)', () => {
 
       throw error;
     } finally {
-      // noop
+      results.push(result);
     }
   }, 10 * 60 * 1000);
 });
